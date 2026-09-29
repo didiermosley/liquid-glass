@@ -39,7 +39,21 @@ export function getDisplacementMap({ height, width, radius, depth }: Displacemen
  * The chained feColorMatrix/feBlend steps implement chromatic aberration and
  * can be removed if the effect is not needed.
  */
-export function getDisplacementFilter({
+const filterCache = new Map<string, string>();
+const CACHE_LIMIT = 64;
+
+export function getDisplacementFilter(options: DisplacementFilterOptions) {
+  const key = `${options.width}|${options.height}|${options.radius}|${options.depth}|${options.strength ?? 100}|${options.chromaticAberration ?? 0}`;
+  let url = filterCache.get(key);
+  if (!url) {
+    url = buildDisplacementFilter(options);
+    if (filterCache.size >= CACHE_LIMIT) filterCache.delete(filterCache.keys().next().value!);
+    filterCache.set(key, url);
+  }
+  return url;
+}
+
+function buildDisplacementFilter({
   height,
   width,
   radius,
@@ -53,7 +67,7 @@ export function getDisplacementFilter({
     <defs>
       <filter id="displace" color-interpolation-filters="sRGB">
         <feImage x="0" y="0" height="${height}" width="${width}" href="${displacementMapUrl}" result="displacementMap" />
-        <feDisplacementMap transform-origin="center" in="SourceGraphic" in2="displacementMap" scale="${strength + chromaticAberration * 2}" xChannelSelector="R" yChannelSelector="G" />
+        <feDisplacementMap in="SourceGraphic" in2="displacementMap" scale="${strength + chromaticAberration * 2}" xChannelSelector="R" yChannelSelector="G" />
         <feColorMatrix type="matrix" values="1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0" result="displacedR" />
         <feDisplacementMap in="SourceGraphic" in2="displacementMap" scale="${strength + chromaticAberration}" xChannelSelector="R" yChannelSelector="G" />
         <feColorMatrix type="matrix" values="0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 1 0" result="displacedG" />

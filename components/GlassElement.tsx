@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, HTMLAttributes, ReactNode } from "react";
 import { getDisplacementFilter, getDisplacementMap } from "@/lib/displacement";
 
@@ -22,18 +22,21 @@ export interface GlassElementProps extends Omit<HTMLAttributes<HTMLDivElement>, 
   minHeight?: number;
   /** Padding applied to the content when `autoSize` is on. */
   padding?: string;
+  /** Scale down slightly and deepen the lens while pressed. */
+  pressable?: boolean;
   style?: CSSProperties;
+  contentStyle?: CSSProperties;
   children?: ReactNode;
 }
 
 const INSET_SHADOW =
-  "1px 1px 1px 0px rgba(255,255,255,0.60) inset, -1px -1px 1px 0px rgba(255,255,255,0.60) inset, 0px 0px 16px 0px rgba(0,0,0,0.04)";
+  "1px 1px 1px 0px rgba(255,255,255,0.60) inset, -1px -1px 1px 0px rgba(255,255,255,0.60) inset, 0px 8px 32px 0px rgba(0,0,0,0.12)";
 
-// Only Chromium supports SVG filters inside backdrop-filter.
+// Only Chromium (not WebKit-based iOS browsers) supports SVG filters inside backdrop-filter.
 function detectSVGFilterSupport() {
   if (typeof CSS === "undefined" || !CSS.supports("backdrop-filter", "blur(1px)")) return false;
   const ua = navigator.userAgent.toLowerCase();
-  return /chrome|chromium|crios|edg/.test(ua) && !/firefox|fxios/.test(ua);
+  return /chrome|chromium|edg/.test(ua) && !/firefox|fxios|crios|edgios/.test(ua);
 }
 
 const subscribeNever = () => () => {};
@@ -57,15 +60,15 @@ export function GlassElement({
   minWidth = 0,
   minHeight = 0,
   padding = "16px 24px",
+  pressable = true,
   style,
+  contentStyle,
   children,
-  onMouseDown,
-  onMouseUp,
-  onMouseLeave,
+  onPointerDown,
   ...rest
 }: GlassElementProps) {
   const boxRef = useRef<HTMLDivElement>(null);
-  const [clicked, setClicked] = useState(false);
+  const [pressed, setPressed] = useState(false);
   const svgSupport = useSyncExternalStore(subscribeNever, detectSVGFilterSupport, () => null);
   const [scale, setScale] = useState(1);
   const [measured, setMeasured] = useState<{ w: number; h: number } | null>(null);
@@ -82,82 +85,77 @@ export function GlassElement({
   }, [responsive]);
 
   useEffect(() => {
-    if (!clicked) return;
-    const release = () => setClicked(false);
-    document.addEventListener("mouseup", release);
-    return () => document.removeEventListener("mouseup", release);
-  }, [clicked]);
+    if (!pressed) return;
+    const release = () => setPressed(false);
+    document.addEventListener("pointerup", release);
+    document.addEventListener("pointercancel", release);
+    return () => {
+      document.removeEventListener("pointerup", release);
+      document.removeEventListener("pointercancel", release);
+    };
+  }, [pressed]);
 
-  // Auto-size: the box sizes itself to its content; the filter is regenerated to match.
   useIsoLayoutEffect(() => {
     const el = boxRef.current;
-    if (!autoSize || !el) return;
+    if (!el) return;
     const measure = () => {
-      const rect = el.getBoundingClientRect();
-      if (!rect.width || !rect.height) return;
-      const w = Math.max(Math.ceil(rect.width), minWidth, 50);
-      const h = Math.max(Math.ceil(rect.height), minHeight, 30);
+      if (!el.offsetWidth || !el.offsetHeight) return;
+      const w = Math.max(el.offsetWidth, minWidth);
+      const h = Math.max(el.offsetHeight, minHeight);
       setMeasured((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
     };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [autoSize, minWidth, minHeight]);
+  }, [minWidth, minHeight]);
 
-  const w = autoSize ? measured?.w : Math.round((baseWidth ?? width) * scale);
-  const h = autoSize ? measured?.h : Math.round((baseHeight ?? height) * scale);
-  const depth = baseDepth / (clicked ? 0.7 : 1);
+  const boxW = Math.round((baseWidth ?? width) * scale);
+  const boxH = Math.round((baseHeight ?? height) * scale);
+  const w = measured?.w ?? (autoSize ? undefined : boxW);
+  const h = measured?.h ?? (autoSize ? undefined : boxH);
+  const r = w && h ? Math.min(radius, w / 2, h / 2) : radius;
+  const depth = baseDepth / (pressed ? 0.7 : 1);
 
-  const dynamic: CSSProperties = { borderRadius: radius };
-  if (!autoSize) {
-    dynamic.width = w;
-    dynamic.height = h;
-  }
-
-  if (w && h && svgSupport !== null) {
+  const effect = useMemo<CSSProperties | null>(() => {
+    if (!w || !h || svgSupport === null) return null;
     if (debug) {
-      dynamic.background = `url("${getDisplacementMap({ height: h, width: w, radius, depth })}")`;
-      dynamic.boxShadow = "none";
-    } else if (!svgSupport) {
-      dynamic.backdropFilter = `blur(${blur * 2}px)`;
-      dynamic.background = backgroundColor;
-      dynamic.border = "1px solid rgba(255, 255, 255, 0.3)";
-    } else {
-      const filter = getDisplacementFilter({ height: h, width: w, radius, depth, strength, chromaticAberration });
-      dynamic.backdropFilter = `blur(${blur / 2}px) url('${filter}') blur(${blur}px) brightness(1.1) saturate(1.5)`;
-      dynamic.background = backgroundColor;
+      return { background: `url("${getDisplacementMap({ height: h, width: w, radius: r, depth })}")`, boxShadow: "none" };
     }
-  }
+    if (!svgSupport) {
+      const backdropFilter = `blur(${Math.max(blur * 4, 8)}px) saturate(1.6)`;
+      return { backdropFilter, WebkitBackdropFilter: backdropFilter, background: backgroundColor };
+    }
+    const filter = getDisplacementFilter({ height: h, width: w, radius: r, depth, strength, chromaticAberration });
+    return {
+      backdropFilter: `blur(${blur / 2}px) url("${filter}") blur(${blur}px) brightness(1.1) saturate(1.5)`,
+      background: backgroundColor,
+    };
+  }, [w, h, r, depth, blur, strength, chromaticAberration, backgroundColor, debug, svgSupport]);
 
   return (
     <div
       {...rest}
       ref={boxRef}
-      onMouseDown={(e) => {
-        setClicked(true);
-        onMouseDown?.(e);
-      }}
-      onMouseUp={(e) => {
-        setClicked(false);
-        onMouseUp?.(e);
-      }}
-      onMouseLeave={(e) => {
-        setClicked(false);
-        onMouseLeave?.(e);
+      onPointerDown={(e) => {
+        if (pressable) setPressed(true);
+        onPointerDown?.(e);
       }}
       style={{
         position: "relative",
         display: autoSize ? "inline-block" : "block",
-        width: autoSize ? "fit-content" : undefined,
+        width: autoSize ? "fit-content" : boxW,
+        height: autoSize ? undefined : boxH,
         minWidth: autoSize ? minWidth : undefined,
         minHeight: autoSize ? minHeight : undefined,
-        background: "rgba(255, 255, 255, 0.4)",
+        borderRadius: r,
+        background: backgroundColor,
         boxShadow: INSET_SHADOW,
-        cursor: "pointer",
-        transition: "transform 0.1s ease",
-        transform: clicked ? "scale(0.98)" : undefined,
-        ...dynamic,
+        cursor: pressable ? "pointer" : undefined,
+        transition: "transform 0.15s ease",
+        transform: pressed ? "scale(0.97)" : undefined,
+        touchAction: "manipulation",
+        ...effect,
         ...style,
       }}
     >
@@ -171,6 +169,7 @@ export function GlassElement({
           width: autoSize ? undefined : "100%",
           height: autoSize ? undefined : "100%",
           padding: autoSize ? padding : undefined,
+          ...contentStyle,
         }}
       >
         {children}
